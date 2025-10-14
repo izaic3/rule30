@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rule 30 Image Generator</title>
+  <style>
+    :root{
+      --bg: #0b0c10; --card:#111317; --muted:#9aa3af; --text:#e5e7eb; --accent:#60a5fa; --border:#1f2430; --green:#22c55e;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;font:16px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    .title{font-weight:800;font-size:clamp(24px,3vw,36px);letter-spacing:.3px;margin:2px 0 6px}
+    .sub{color:var(--muted);margin-bottom:16px}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,0));border:1px solid var(--border);border-radius:18px;padding:14px 14px 16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;align-items:end;margin-bottom:12px}
+    label{display:block;font-weight:600;margin-bottom:6px;color:#cbd5e1}
+    input[type="number"],input[type="range"],select{width:100%;padding:10px 12px;color:var(--text);background:#0e1116;border:1px solid var(--border);border-radius:12px;outline:none}
+    input[type="range"]{padding:0;height:36px}
+    .btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
+    button{appearance:none;border:1px solid var(--border);background:#0e1116;color:var(--text);padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer;transition:transform .04s ease,box-shadow .2s ease}
+    button.primary{background:linear-gradient(180deg,#2563eb,#1d4ed8);border-color:#1e40af}
+    button:hover{transform:translateY(-1px)}
+    button:active{transform:translateY(0)}
+    .preview-wrap{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:10px;overflow:auto}
+    .row{display:flex;gap:14px;align-items:center}
+    .tiny{font-size:12px;color:var(--muted)}
+    canvas{image-rendering: pixelated; display:block;max-width:100%}
+    .pill{display:inline-flex;align-items:center;gap:8px;background:#0f131a;border:1px solid var(--border);border-radius:999px;padding:6px 10px;color:#a7b0bf}
+    .code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0e1116;border:1px solid var(--border);padding:2px 8px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">Rule 30 — Cellular Automaton Image Generator</div>
+    <div class="sub">Pick your number of rows, get a crisp preview, and export a full‑resolution PNG. Starts from a single black cell centered on row 0. Width auto‑scales to fit the full triangle (<span class="code">width = 2×rows + 1</span>).</div>
+
+    <div class="card">
+      <div class="controls">
+        <div>
+          <label for="rows">Rows</label>
+          <input id="rows" type="number" min="10" max="4000" step="10" value="200" />
+          <div class="tiny">10–4000. Wider preview if you choose more rows.</div>
+        </div>
+        <div>
+          <label for="previewSize">Preview cell size (px)</label>
+          <input id="previewSize" type="number" min="1" max="10" value="3" />
+          <div class="tiny">Affects on‑page preview only.</div>
+        </div>
+        <div>
+          <label for="exportScale">Export scale</label>
+          <input id="exportScale" type="number" min="1" max="20" value="2" />
+          <div class="tiny">1 = 1 px per cell. Higher = larger PNG.</div>
+        </div>
+        <div>
+          <label for="palette">Palette</label>
+          <select id="palette">
+            <option value="bw" selected>Black on White</option>
+            <option value="wb">White on Black</option>
+            <option value="bblue">Black on Deep Blue</option>
+            <option value="neon">Neon (teal on charcoal)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="btns">
+        <button class="primary" id="generate">Generate Preview</button>
+        <button id="download">Download PNG</button>
+        <span class="pill" id="meta"></span>
+      </div>
+    </div>
+
+    <div style="height:16px"></div>
+
+    <div class="preview-wrap">
+      <canvas id="preview" width="0" height="0" aria-label="Rule 30 preview image"></canvas>
+    </div>
+
+    <div style="margin-top:10px" class="tiny">Tip: For the classic Sierpiński‑like look in other rules, try Rule 90. Here we stick to Rule 30 (binary 00011110).</div>
+  </div>
+
+  <script>
+    // Detect conservative canvas limits to avoid 0‑byte PNGs on huge exports
+    const CanvasCaps = (() => {
+      const test = document.createElement('canvas');
+      const ctx = test.getContext('2d');
+      // Conservative defaults for Chromium/Firefox/Safari
+      let maxDim = 16384;           // max width or height
+      let maxArea = 268435456;      // ~268M pixels
+      try{
+        // Probe a bit: try to set to a large but plausible size
+        test.width = 16384; test.height = 16384;
+        ctx.fillRect(0,0,1,1);
+      }catch(e){ /* keep defaults */ }
+      return { maxDim, maxArea };
+    })();
+
+    // Core: compute one full Rule 30 image as ImageData (1px per cell)
+    function computeRule30ImageData(rows, fgRGBA, bgRGBA){
+      const width = 2*rows + 1; // enough to contain the full triangle
+      const off = new OffscreenCanvas(width, rows);
+      const ctx = off.getContext('2d', { willReadFrequently: false });
+      const img = ctx.createImageData(width, rows);
+      const data = img.data;
+
+      // Row 0: single live cell in center
+      let current = new Uint8Array(width);
+      current[Math.floor(width/2)] = 1;
+
+      let idx = 0;
+      // Fill row by row
+      for (let y=0; y<rows; y++){
+        for (let x=0; x<width; x++){
+          if (current[x]){
+            data[idx++] = fgRGBA[0];
+            data[idx++] = fgRGBA[1];
+            data[idx++] = fgRGBA[2];
+            data[idx++] = fgRGBA[3];
+          } else {
+            data[idx++] = bgRGBA[0];
+            data[idx++] = bgRGBA[1];
+            data[idx++] = bgRGBA[2];
+            data[idx++] = bgRGBA[3];
+          }
+        }
+        // Compute next row using Rule 30
+        const next = new Uint8Array(width);
+        for (let x=0; x<width; x++){
+          const L = x>0 ? current[x-1] : 0;
+          const C = current[x];
+          const R = x<width-1 ? current[x+1] : 0;
+          // Rule 30 truth table -> next = L XOR (C OR R)
+          next[x] = (L ^ (C | R)) & 1;
+        }
+        current = next;
+      }
+
+      return { img, width, height: rows };
+    }
+
+    function getPalette(name){
+      switch(name){
+        case 'wb': return { fg:[255,255,255,255], bg:[0,0,0,255] };
+        case 'bblue': return { fg:[0,0,0,255], bg:[13,23,42,255] };
+        case 'neon': return { fg:[34,197,94,255], bg:[17,19,23,255] }; // teal/green on charcoal
+        case 'bw':
+        default: return { fg:[0,0,0,255], bg:[255,255,255,255] };
+      }
+    }
+
+    const $ = sel => document.querySelector(sel);
+    const rowsEl = $('#rows');
+    const previewSizeEl = $('#previewSize');
+    const exportScaleEl = $('#exportScale');
+    const paletteEl = $('#palette');
+    const metaEl = $('#meta');
+    const canvas = $('#preview');
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+
+    function formatNumber(n){
+      return n.toLocaleString(undefined);
+    }
+
+    let lastRaster = null; // cache most recent 1x raster (ImageData)
+
+    function generate(){
+      const rows = clamp(parseInt(rowsEl.value||"200",10), 10, 4000);
+      const cellPx = clamp(parseInt(previewSizeEl.value||"3",10), 1, 10);
+      const {fg, bg} = getPalette(paletteEl.value);
+
+      const t0 = performance.now();
+      const raster = computeRule30ImageData(rows, fg, bg);
+      const t1 = performance.now();
+      lastRaster = raster; // store
+
+      // Preview sizing
+      canvas.width = raster.width * cellPx;
+      canvas.height = raster.height * cellPx;
+      // Put 1x image first, then scale with nearest-neighbor drawImage
+      const tmp = new OffscreenCanvas(raster.width, raster.height);
+      const tctx = tmp.getContext('2d');
+      tctx.putImageData(raster.img, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.save();
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(tmp, 0, 0, raster.width, raster.height, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      const bytes = raster.width * raster.height * 4;
+      metaEl.innerHTML = `${formatNumber(raster.width)} × ${formatNumber(raster.height)} cells · ${formatNumber(bytes)} bytes raw · generated in ${(t1 - t0).toFixed(1)} ms`;
+    }
+
+    // Compute a safe export scale given browser canvas caps
+    function safeScaleFor(width, height, requested){
+      let s = Math.max(1, Math.floor(requested));
+      const { maxDim, maxArea } = CanvasCaps;
+      // Cap by dimension
+      s = Math.min(s, Math.floor(maxDim / width) || 1, Math.floor(maxDim / height) || 1);
+      // Cap by area
+      while ((width * s) * (height * s) > maxArea) s--;
+      return Math.max(1, s);
+    }
+
+    async function download(){
+      if(!lastRaster){ generate(); }
+      const { width, height, img } = lastRaster;
+      const requestedScale = clamp(parseInt(exportScaleEl.value||"2",10), 1, 20);
+      const scale = safeScaleFor(width, height, requestedScale);
+      const adjusted = scale !== requestedScale;
+
+      const outW = width * scale;
+      const outH = height * scale;
+
+      // Build a high‑res canvas using nearest neighbor scaling
+      const out = document.createElement('canvas');
+      out.width = outW;
+      out.height = outH;
+      const octx = out.getContext('2d');
+      octx.imageSmoothingEnabled = false;
+
+      // Put the 1x raster on a small offscreen canvas then draw scaled
+      const small = document.createElement('canvas');
+      small.width = width;
+      small.height = height;
+      const sctx = small.getContext('2d');
+      sctx.putImageData(img, 0, 0);
+      octx.drawImage(small, 0, 0, width, height, 0, 0, outW, outH);
+
+      // Use toBlob (streaming) instead of data URL to avoid memory bloat
+      const blob = await new Promise(resolve => out.toBlob(resolve, 'image/png'));
+      if(!blob){
+        alert('Export failed — the requested size is too large for this browser. Try lowering rows or export scale.');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.download = `rule30_${width}x${height}_scale${scale}.png`;
+      a.href = url;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+      if(adjusted){
+        // Let the user know we auto‑reduced scale
+        metaEl.innerHTML += ` · export scale adjusted to ${scale} due to canvas limits`;
+      }
+    }
+
+    function clamp(v, min, max){ return Math.min(max, Math.max(min, v)); }
+
+    $('#generate').addEventListener('click', generate);
+    $('#download').addEventListener('click', download);
+
+    // Auto-generate on load
+    window.addEventListener('DOMContentLoaded', generate);
+  </script>
+</body>
+</html>
